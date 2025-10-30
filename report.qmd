@@ -1,34 +1,169 @@
 ---
-title: "EV Power - Lab 4 Project Report"
-format: typst
+title: "A State-Level Analysis of Renewable Energy and EV Intensity"
+author: Joanna Zhu
+format: pdf
+execute:
+  echo: false
+  message: false
+  warning: false
 ---
-
-# Example Solution 1
 
 ## **Part 0: libraries**
 
 ```{r}
-
+library(tidyverse)
+library(stringr)
+library(janitor)
+library(usmap)
+library(ggplot2)
+library(scales)
+library(patchwork)
+library(here)
 ```
 
 ## **Part 1:** **Defining Research Question**
 
-Chosen Question:
+Chosen Question: Do states with higher shares of renewable energy also have more electric vehicle registrations per energy use in 2023?
 
 ## **Part 2: Data Preparation and Cleaning**
 
 ```{r}
+# loading datasets
+renew <- read_csv(here("data", "renew-use-2023.csv")) |> clean_names()
+total <- read_csv(here("data", "total-use-2023.csv")) |> clean_names()
+ev    <- read_csv(here("data", "ev-registrations-by-state-2023.csv"), skip = 1) |> clean_names()
 
+# renewable energy data
+renew <- renew |>
+  mutate(
+    renewable_use_2023 = str_remove_all(renewable_use_2023, "[:alpha:]|[:punct:]"),
+    renewable_use_2023 = as.numeric(renewable_use_2023)
+  ) |>
+  group_by(state) |>
+  summarise(total_renew_use_2023 = sum(renewable_use_2023, na.rm = TRUE))
+
+# total energy data
+total <- total |>
+  pivot_longer(-energy_source, names_to = "state", values_to = "energy_use") |>
+  filter(!grepl("total", energy_source, ignore.case = TRUE)) |>
+  mutate(
+    state = str_trim(state),
+    state = toupper(state),
+    energy_use = as.numeric(energy_use)
+  ) |>
+  group_by(state) |>
+  summarise(total_energy_use_2023 = sum(energy_use, na.rm = TRUE)) |>
+  ungroup()
+
+# ev registration data
+ev <- ev |>
+  rename(state = 1, ev_count = 2) |>
+  mutate(
+    state = str_trim(state),
+    state = str_to_title(state),
+    ev_count = str_remove_all(ev_count, "[^0-9]"),
+    ev_count = as.numeric(ev_count)
+  ) |>
+  filter(!is.na(ev_count)) |>
+  rename(ev_registration_count_2023 = ev_count)
+
+# consistent state names
+renew <- renew |>
+  mutate(state = str_trim(state),
+         state = toupper(state))
+
+total <- total |>
+  mutate(state = str_trim(state),
+         state = toupper(state))
+
+state_lookup <- tibble(
+  state = state.abb,
+  full_state = state.name
+)
+
+renew <- renew |>
+  left_join(state_lookup, by = "state") |>
+  mutate(state = if_else(is.na(full_state), state, full_state)) |>
+  select(-full_state)
+
+total <- total |>
+  left_join(state_lookup, by = "state") |>
+  mutate(state = if_else(is.na(full_state), state, full_state)) |>
+  select(-full_state)
+
+renew <- renew |> mutate(state = if_else(state == "DC", "District of Columbia", state))
+total <- total |> mutate(state = if_else(state == "DC", "District of Columbia", state))
+
+renew <- renew |> filter(state != "US")
+total <- total |> filter(state != "US")
+ev <- ev |> filter(state != "Total")
+
+head(renew)
+head(total)
+head(ev)
 ```
 
 ## **Part 3: Joining / Pivoting Datasets for Analysis**
 
 ```{r}
+# join datasets
+energy_ev_2023 <- renew |>
+  left_join(total, by = "state") |>
+  left_join(ev, by = "state")
 
+# create new variables
+energy_ev_2023 <- energy_ev_2023 |>
+  mutate(
+    renewable_share_2023 = 100 * (total_renew_use_2023 / total_energy_use_2023),
+    
+    ev_per_energy_unit_2023 = 100 *
+    (ev_registration_count_2023 / total_energy_use_2023)
+  ) |>
+  filter(!is.na(renewable_share_2023) & !is.na(ev_per_energy_unit_2023))
+
+head(energy_ev_2023)
 ```
+
+To explore whether states with higher shares of renewable energy also have more electric-vehicle (EV) registrations per energy use, I joined three state-level datasets: renewable energy consumption, total energy consumption, and EV registrations. The combined table allowed direct comparison across all states. I then created two new variables: the percentage of renewable energy out of total energy use and the ratio of EV registrations to total energy use.
 
 ## **Part 4: Mapping Visualization**
 
 ```{r}
+us_states <- map_data("state")
 
+df <- energy_ev_2023 |>
+  mutate(region = tolower(state))
+
+m1 <- ggplot(us_states |> left_join(df, by = "region"),
+             aes(long, lat, group = group, fill = renewable_share_2023)) +
+  geom_polygon(color = "white", linewidth = 0.15) +
+  coord_fixed(1.3) +
+  scale_fill_gradient(low = "#FFFDE0", high = "#4E944F",
+                      name = "Renewable (%)",
+                      labels = scales::percent_format(scale = 1)) +
+  labs(title = "Renewable Energy Share (2023)") +
+  theme_void(base_size = 7) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(size = 8, face = "bold", hjust = 0.5)
+  )
+
+m2 <- ggplot(us_states |> left_join(df, by = "region"),
+             aes(long, lat, group = group, fill = ev_per_energy_unit_2023)) +
+  geom_polygon(color = "white", linewidth = 0.15) +
+  coord_fixed(1.3) +
+  scale_fill_gradient(low = "#E2F0FF", high = "#1F5AA6",
+                      name = "EVs / Energy Unit",
+                      labels = scales::comma) +
+  labs(title = "EVs per Energy Use (2023)") +
+  theme_void(base_size = 7) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(size = 8, face = "bold", hjust = 0.5)
+  )
+
+m1 + m2
 ```
+
+## **Part 5: Analysis**
+The two maps above compare each state's share of renewable energy and the number of electric vehicle (EV) registrations per total energy use. I noticed some states with cleaner electricity mixes, such as Washington, Oregon, and Vermont, also tend to show relatively high EV intensity, suggesting that EV charging in these regions is more likely powered by renewable sources. In contrast, other states with high EV intensity but only moderate to low renewable shares, such as California and Florida, indicate that a significant portion of charging demand is still met by non-renewable generation. Overall, the visualizations reveal that the relationship between renewable energy share and EV adoption varies widely across the United States. While EVs reduce direct emissions, the cleanliness of the electricity used to charge them depends heavily on each state’s energy mix. In many states, the electricity powering EVs still comes partly from non-renewable sources including fossil fuels.
